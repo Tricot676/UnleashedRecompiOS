@@ -26,13 +26,13 @@ jobs:
         shell: pwsh
         run: |
           $headers = Get-ChildItem UnleashedRecomp/gpu/shader/hlsl -Filter '*.hlsl.spirv.h' | ForEach-Object FullName
-          Compress-Archive -LiteralPath $headers -DestinationPath "$env:RUNNER_TEMP/ios-spirv.zip" -Force
+          Compress-Archive -LiteralPath $headers -DestinationPath ios-spirv.zip -Force
 
       - name: Upload shader headers
         uses: actions/upload-artifact@v4
         with:
           name: ios-spirv-headers
-          path: ${{ runner.temp }}/ios-spirv.zip
+          path: ios-spirv.zip
           retention-days: 1
 
   build-ios:
@@ -48,19 +48,33 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-spirv-headers
-          path: ${{ runner.temp }}/ios-spirv
+          path: ios-spirv
 
       - name: Restore shader headers
-        run: unzip -o "$RUNNER_TEMP/ios-spirv/ios-spirv.zip" -d UnleashedRecomp/gpu/shader/hlsl
+        run: unzip -o ios-spirv/ios-spirv.zip -d UnleashedRecomp/gpu/shader/hlsl
 
       - name: Install build tools
         run: brew install cmake ninja
 
+      - name: Configure native helper tools
+        run: cmake --preset macos-release
+
+      - name: Build host resource converter
+        run: cmake --build out/build/macos-release --config Release --target file_to_c
+
       - name: Configure iOS app
-        run: >-
-          cmake --preset ios-xcode-release
-          -DUNLEASHED_RECOMP_IOS_ENABLE_CODE_SIGNING=OFF
-          -DUNLEASHED_RECOMP_IOS_BUNDLE_ID=io.github.unleashedrecomp.sideload
+        shell: bash
+        run: |
+          HOST_FILE_TO_C="$(find out/build/macos-release -type f -name file_to_c -perm -111 -print -quit)"
+          test -n "$HOST_FILE_TO_C"
+          cat > "$RUNNER_TEMP/ios-host-tool.cmake" <<'EOF'
+          if(NOT DEFINED UNLEASHED_RECOMP_HOST_FILE_TO_C OR NOT EXISTS "${UNLEASHED_RECOMP_HOST_FILE_TO_C}")
+              message(FATAL_ERROR "The native file_to_c helper was not found.")
+          endif()
+          add_executable(file_to_c IMPORTED GLOBAL)
+          set_target_properties(file_to_c PROPERTIES IMPORTED_LOCATION "${UNLEASHED_RECOMP_HOST_FILE_TO_C}")
+          EOF
+          cmake --preset ios-xcode-release -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="$RUNNER_TEMP/ios-host-tool.cmake" -DUNLEASHED_RECOMP_HOST_FILE_TO_C="$HOST_FILE_TO_C" -DUNLEASHED_RECOMP_IOS_ENABLE_CODE_SIGNING=OFF -DUNLEASHED_RECOMP_IOS_BUNDLE_ID=io.github.unleashedrecomp.sideload
 
       - name: Build iOS app
         run: cmake --build out/build/ios-xcode-release --config Release --target UnleashedRecomp
@@ -72,11 +86,11 @@ jobs:
           test -n "$APP_PATH"
           mkdir -p package/Payload
           ditto "$APP_PATH" package/Payload/"$(basename "$APP_PATH")"
-          (cd package && zip -qry "$RUNNER_TEMP/UnleashedRecomp-unsigned.ipa" Payload)
+          (cd package && zip -qry "$GITHUB_WORKSPACE/UnleashedRecomp-unsigned.ipa" Payload)
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: UnleashedRecomp-unsigned-IPA
-          path: ${{ runner.temp }}/UnleashedRecomp-unsigned.ipa
+          path: UnleashedRecomp-unsigned.ipa
           retention-days: 3
