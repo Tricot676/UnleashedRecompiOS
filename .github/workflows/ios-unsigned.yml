@@ -1,0 +1,82 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-ios-shaders:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install DirectX Shader Compiler
+        run: winget install --id Microsoft.DirectX.ShaderCompiler --exact --source winget --accept-package-agreements --accept-source-agreements
+
+      - name: Generate SPIR-V headers
+        shell: pwsh
+        run: ./tools/generate-ios-spirv.ps1 -RepositoryRoot $PWD
+
+      - name: Package shader headers
+        shell: pwsh
+        run: |
+          $headers = Get-ChildItem UnleashedRecomp/gpu/shader/hlsl -Filter '*.hlsl.spirv.h' | ForEach-Object FullName
+          Compress-Archive -LiteralPath $headers -DestinationPath "$env:RUNNER_TEMP/ios-spirv.zip" -Force
+
+      - name: Upload shader headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-spirv-headers
+          path: ${{ runner.temp }}/ios-spirv.zip
+          retention-days: 1
+
+  build-ios:
+    needs: generate-ios-shaders
+    runs-on: macos-15
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download shader headers
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-spirv-headers
+          path: ${{ runner.temp }}/ios-spirv
+
+      - name: Restore shader headers
+        run: unzip -o "$RUNNER_TEMP/ios-spirv/ios-spirv.zip" -d UnleashedRecomp/gpu/shader/hlsl
+
+      - name: Install build tools
+        run: brew install cmake ninja
+
+      - name: Configure iOS app
+        run: >-
+          cmake --preset ios-xcode-release
+          -DUNLEASHED_RECOMP_IOS_ENABLE_CODE_SIGNING=OFF
+          -DUNLEASHED_RECOMP_IOS_BUNDLE_ID=io.github.unleashedrecomp.sideload
+
+      - name: Build iOS app
+        run: cmake --build out/build/ios-xcode-release --config Release --target UnleashedRecomp
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          APP_PATH="$(find out/build/ios-xcode-release -type d -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          mkdir -p package/Payload
+          ditto "$APP_PATH" package/Payload/"$(basename "$APP_PATH")"
+          (cd package && zip -qry "$RUNNER_TEMP/UnleashedRecomp-unsigned.ipa" Payload)
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnleashedRecomp-unsigned-IPA
+          path: ${{ runner.temp }}/UnleashedRecomp-unsigned.ipa
+          retention-days: 3
